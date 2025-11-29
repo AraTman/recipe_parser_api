@@ -30,12 +30,13 @@ app = FastAPI(
 # MongoDB connection
 MONGODB_URL = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
 MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME", "recipe_parser")
-ENABLE_AI_PARSING = os.getenv("ENABLE_AI_PARSING", "false").lower() == "true"
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 # Proxy settings (optional)
 PROXY_URL = os.getenv("PROXY_URL", "")  # Format: http://user:pass@host:port or http://host:port
 PROXY_ENABLED = bool(PROXY_URL)
+
+# n8n webhook (optional)
+N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL", "")
 
 mongo_client = None
 db = None
@@ -86,7 +87,6 @@ class Recipe(BaseModel):
 
 class RecipeRequest(BaseModel):
     url: str
-    use_ai: Optional[bool] = False  # AI-powered parsing kullan
     
     @field_validator('url')
     @classmethod
@@ -284,64 +284,8 @@ class YouTubeScraper:
             }
 
 
-# ==================== AI PARSER ====================
-
-class AIRecipeParser:
-    """OpenAI GPT ile gelişmiş tarif parsing"""
-    
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-        self.enabled = bool(api_key)
-    
-    async def parse_with_ai(self, text: str, platform: str) -> Dict:
-        """AI ile tarif parse et"""
-        if not self.enabled:
-            raise ValueError("OpenAI API key tanımlanmamış")
-        
-        try:
-            from openai import AsyncOpenAI
-            client = AsyncOpenAI(api_key=self.api_key)
-            
-            prompt = f"""
-Aşağıdaki {platform} tarif metnini analiz et ve JSON formatında döndür:
-
-Metin:
-{text}
-
-Çıktı formatı (JSON):
-{{
-    "title": "Tarif başlığı",
-    "ingredients": [
-        {{"item": "Malzeme adı", "amount": "Miktar", "unit": "Birim"}},
-        ...
-    ],
-    "steps": [
-        {{"order": 1, "text": "Adım açıklaması", "duration": "Süre (varsa)"}},
-        ...
-    ],
-    "total_duration": "Toplam süre",
-    "difficulty": "Kolay/Orta/Zor",
-    "servings": "Porsiyon bilgisi"
-}}
-
-Sadece JSON döndür, başka açıklama ekleme.
-"""
-            
-            response = await client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": "Sen bir yemek tarifi analiz uzmanısın. Verilen metinlerden tarif bilgilerini çıkarıyorsun."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.3,
-                response_format={"type": "json_object"}
-            )
-            
-            result = json.loads(response.choices[0].message.content)
-            return result
-            
-        except Exception as e:
-            raise ValueError(f"AI parsing hatası: {str(e)}")
+# ==================== AI PARSER (Removed - Use n8n instead) ====================
+# AI parsing artık n8n workflow'larında yapılacak
 
 
 # ==================== DATABASE HELPER ====================
@@ -655,12 +599,11 @@ class RecipeParser:
 class RecipeService:
     """Ana tarif servisi"""
     
-    def __init__(self, db=None, openai_api_key: str = "", proxy_url: Optional[str] = None):
+    def __init__(self, db=None, proxy_url: Optional[str] = None):
         self.instagram_scraper = InstagramScraper(proxy_url=proxy_url)
         self.tiktok_scraper = TikTokScraper(proxy_url=proxy_url)
         self.youtube_scraper = YouTubeScraper(proxy_url=proxy_url)
         self.parser = RecipeParser()
-        self.ai_parser = AIRecipeParser(openai_api_key)
         self.db_helper = DatabaseHelper(db)
         self.proxy_url = proxy_url
     
@@ -687,8 +630,8 @@ class RecipeService:
         else:
             raise ValueError('Desteklenmeyen platform')
     
-    async def parse_recipe(self, url: str, use_ai: bool = False) -> Recipe:
-        """URL'den tarif çıkar (cache + AI destekli)"""
+    async def parse_recipe(self, url: str) -> Recipe:
+        """URL'den tarif çıkar (cache destekli)"""
         
         # 1. Cache kontrolü
         cached = await self.db_helper.get_cached_recipe(url)
@@ -703,40 +646,15 @@ class RecipeService:
         content = self.scrape_content(url, platform)
         caption = content['caption']
         
-        # 4. Parse et (AI veya Regex)
-        if use_ai and self.ai_parser.enabled:
-            print(f"🤖 AI ile parsing: {url}")
-            try:
-                ai_result = await self.ai_parser.parse_with_ai(caption, platform)
-                
-                # AI sonucunu Recipe formatına dönüştür
-                ingredients = [Ingredient(**ing) for ing in ai_result.get('ingredients', [])]
-                steps = [RecipeStep(**step) for step in ai_result.get('steps', [])]
-                title = ai_result.get('title', 'Tarif')
-                total_duration = ai_result.get('total_duration')
-                difficulty = ai_result.get('difficulty', 'Orta')
-                servings = ai_result.get('servings')
-                
-            except Exception as e:
-                print(f"⚠️ AI parsing başarısız, regex'e geçiliyor: {e}")
-                # AI başarısız olursa regex'e düş
-                title = self.parser.extract_title(caption)
-                ingredients = self.parser.parse_ingredients(caption)
-                steps = self.parser.parse_steps(caption)
-                duration_match = re.search(r'(\d+)\s*dakika', caption, re.IGNORECASE)
-                total_duration = duration_match.group(0) if duration_match else None
-                difficulty = self.parser.extract_difficulty(caption)
-                servings = self.parser.extract_servings(caption)
-        else:
-            print(f"📝 Regex ile parsing: {url}")
-            # Standart regex parsing
-            title = self.parser.extract_title(caption)
-            ingredients = self.parser.parse_ingredients(caption)
-            steps = self.parser.parse_steps(caption)
-            duration_match = re.search(r'(\d+)\s*dakika', caption, re.IGNORECASE)
-            total_duration = duration_match.group(0) if duration_match else None
-            difficulty = self.parser.extract_difficulty(caption)
-            servings = self.parser.extract_servings(caption)
+        # 4. Parse et (Regex ile - AI parsing n8n'de yapılacak)
+        print(f"📝 Regex ile parsing: {url}")
+        title = self.parser.extract_title(caption)
+        ingredients = self.parser.parse_ingredients(caption)
+        steps = self.parser.parse_steps(caption)
+        duration_match = re.search(r'(\d+)\s*dakika', caption, re.IGNORECASE)
+        total_duration = duration_match.group(0) if duration_match else None
+        difficulty = self.parser.extract_difficulty(caption)
+        servings = self.parser.extract_servings(caption)
         
         # 5. Hashtag'ler
         hashtags = re.findall(r'#(\w+)', caption)
@@ -797,8 +715,8 @@ async def startup_db_client():
         db = None
     
     # Initialize service with DB and proxy
-    service = RecipeService(db=db, openai_api_key=OPENAI_API_KEY, proxy_url=PROXY_URL if PROXY_ENABLED else None)
-    print(f"🚀 RecipeService başlatıldı (AI: {service.ai_parser.enabled}, Proxy: {PROXY_ENABLED})")
+    service = RecipeService(db=db, proxy_url=PROXY_URL if PROXY_ENABLED else None)
+    print(f"🚀 RecipeService başlatıldı (Proxy: {PROXY_ENABLED})")
 
 
 @app.on_event("shutdown")
@@ -837,28 +755,20 @@ async def parse_recipe(request: RecipeRequest):
     """
     Instagram, TikTok veya YouTube Shorts URL'den tarif çıkar
     
-    **Yeni Özellikler:**
+    **Özellikler:**
     - ✅ MongoDB cache (aynı URL tekrar istenirse cache'den döner)
-    - ✅ AI-powered parsing (use_ai: true ile)
+    - ✅ Regex-based parsing (hızlı ve güvenilir)
+    - ✅ n8n entegrasyonu (AI parsing için n8n workflow kullan)
     
     **Desteklenen Platformlar:**
     - Instagram (Reels, Posts)
     - TikTok
     - YouTube Shorts
     
-    **Örnek Request (Normal):**
+    **Örnek Request:**
     ```json
     {
-        "url": "https://www.instagram.com/p/ABC123/",
-        "use_ai": false
-    }
-    ```
-    
-    **Örnek Request (AI ile):**
-    ```json
-    {
-        "url": "https://www.instagram.com/p/ABC123/",
-        "use_ai": true
+        "url": "https://www.instagram.com/p/ABC123/"
     }
     ```
     
@@ -875,9 +785,11 @@ async def parse_recipe(request: RecipeRequest):
         "message": "Tarif başarıyla çıkarıldı"
     }
     ```
+    
+    **Not:** AI-powered parsing için n8n workflow kullanın.
     """
     try:
-        recipe = await service.parse_recipe(request.url, use_ai=request.use_ai)
+        recipe = await service.parse_recipe(request.url)
         
         return RecipeResponse(
             success=True,
@@ -933,16 +845,14 @@ async def cache_stats():
     {
         "total_recipes": 150,
         "total_accesses": 1250,
-        "cache_enabled": true,
-        "ai_enabled": true
+        "cache_enabled": true
     }
     ```
     """
     stats = await service.db_helper.get_stats()
     return {
         **stats,
-        "cache_enabled": db is not None,
-        "ai_enabled": service.ai_parser.enabled
+        "cache_enabled": db is not None
     }
 
 
