@@ -4,7 +4,7 @@ Production Recipe Parser API
 Instagram, TikTok, YouTube Shorts destekli tarif çıkarma API'si
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, validator
 from typing import List, Optional, Dict
@@ -13,12 +13,32 @@ import instaloader
 import requests
 from datetime import datetime
 import os
+from motor.motor_asyncio import AsyncIOMotorClient
+from dotenv import load_dotenv
+import hashlib
+import json
+
+# Load environment variables
+load_dotenv()
 
 app = FastAPI(
     title="Recipe Parser API",
-    description="Instagram, TikTok, YouTube Shorts'tan tarif çıkarma API'si",
-    version="1.0.0"
+    description="Instagram, TikTok, YouTube Shorts'tan tarif çıkarma API'si (MongoDB cache + AI parsing)",
+    version="2.0.0"
 )
+
+# MongoDB connection
+MONGODB_URL = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
+MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME", "recipe_parser")
+ENABLE_AI_PARSING = os.getenv("ENABLE_AI_PARSING", "false").lower() == "true"
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+
+# Proxy settings (optional)
+PROXY_URL = os.getenv("PROXY_URL", "")  # Format: http://user:pass@host:port or http://host:port
+PROXY_ENABLED = bool(PROXY_URL)
+
+mongo_client = None
+db = None
 
 # CORS - Mobil app için
 app.add_middleware(
@@ -66,6 +86,7 @@ class Recipe(BaseModel):
 
 class RecipeRequest(BaseModel):
     url: str
+    use_ai: Optional[bool] = False  # AI-powered parsing kullan
     
     @validator('url')
     def validate_url(cls, v):
@@ -89,20 +110,33 @@ class HealthResponse(BaseModel):
 # ==================== SCRAPERS ====================
 
 class InstagramScraper:
-    """Instagram scraper"""
+    """Instagram scraper with proxy support"""
     
-    def __init__(self):
-        self.loader = instaloader.Instaloader(
-            download_videos=False,
-            download_video_thumbnails=False,
-            download_geotags=False,
-            download_comments=False,
-            save_metadata=False,
-            compress_json=False,
-            post_metadata_txt_pattern='',
-            sleep=True,
-            quiet=True,
-        )
+    def __init__(self, proxy_url: Optional[str] = None):
+        self.proxy_url = proxy_url
+        
+        # Instaloader proxy ayarları
+        loader_kwargs = {
+            'download_videos': False,
+            'download_video_thumbnails': False,
+            'download_geotags': False,
+            'download_comments': False,
+            'save_metadata': False,
+            'compress_json': False,
+            'post_metadata_txt_pattern': '',
+            'sleep': True,
+            'quiet': True,
+        }
+        
+        self.loader = instaloader.Instaloader(**loader_kwargs)
+        
+        # Proxy ayarla
+        if proxy_url:
+            self.loader.context._session.proxies = {
+                'http': proxy_url,
+                'https': proxy_url
+            }
+            print(f"🔒 Instagram scraper proxy kullanıyor: {proxy_url}")
     
     def extract_shortcode(self, url: str) -> Optional[str]:
         patterns = [
@@ -137,7 +171,11 @@ class InstagramScraper:
 
 
 class TikTokScraper:
-    """TikTok scraper (API-based)"""
+    """TikTok scraper (API-based) with proxy support"""
+    
+    def __init__(self, proxy_url: Optional[str] = None):
+        self.proxy_url = proxy_url
+        self.proxies = {'http': proxy_url, 'https': proxy_url} if proxy_url else None
     
     def extract_video_id(self, url: str) -> Optional[str]:
         patterns = [
@@ -177,7 +215,11 @@ class TikTokScraper:
 
 
 class YouTubeScraper:
-    """YouTube Shorts scraper"""
+    """YouTube Shorts scraper with proxy support"""
+    
+    def __init__(self, proxy_url: Optional[str] = None):
+        self.proxy_url = proxy_url
+        self.proxies = {'http': proxy_url, 'https': proxy_url} if proxy_url else None
     
     def extract_video_id(self, url: str) -> Optional[str]:
         patterns = [
@@ -208,6 +250,10 @@ class YouTubeScraper:
                 'extract_flat': True,
             }
             
+            # Proxy ekle
+            if self.proxy_url:
+                ydl_opts['proxy'] = self.proxy_url
+            
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 
@@ -235,6 +281,139 @@ class YouTubeScraper:
                 'date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 'thumbnail_url': None,
             }
+
+
+# ==================== AI PARSER ====================
+
+class AIRecipeParser:
+    """OpenAI GPT ile gelişmiş tarif parsing"""
+    
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self.enabled = bool(api_key)
+    
+    async def parse_with_ai(self, text: str, platform: str) -> Dict:
+        """AI ile tarif parse et"""
+        if not self.enabled:
+            raise ValueError("OpenAI API key tanımlanmamış")
+        
+        try:
+            from openai import AsyncOpenAI
+            client = AsyncOpenAI(api_key=self.api_key)
+            
+            prompt = f"""
+Aşağıdaki {platform} tarif metnini analiz et ve JSON formatında döndür:
+
+Metin:
+{text}
+
+Çıktı formatı (JSON):
+{{
+    "title": "Tarif başlığı",
+    "ingredients": [
+        {{"item": "Malzeme adı", "amount": "Miktar", "unit": "Birim"}},
+        ...
+    ],
+    "steps": [
+        {{"order": 1, "text": "Adım açıklaması", "duration": "Süre (varsa)"}},
+        ...
+    ],
+    "total_duration": "Toplam süre",
+    "difficulty": "Kolay/Orta/Zor",
+    "servings": "Porsiyon bilgisi"
+}}
+
+Sadece JSON döndür, başka açıklama ekleme.
+"""
+            
+            response = await client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "Sen bir yemek tarifi analiz uzmanısın. Verilen metinlerden tarif bilgilerini çıkarıyorsun."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,
+                response_format={"type": "json_object"}
+            )
+            
+            result = json.loads(response.choices[0].message.content)
+            return result
+            
+        except Exception as e:
+            raise ValueError(f"AI parsing hatası: {str(e)}")
+
+
+# ==================== DATABASE HELPER ====================
+
+class DatabaseHelper:
+    """MongoDB cache yönetimi"""
+    
+    def __init__(self, db):
+        self.db = db
+        self.collection = db.recipes if db else None
+    
+    def get_url_hash(self, url: str) -> str:
+        """URL'den unique hash oluştur"""
+        return hashlib.md5(url.encode()).hexdigest()
+    
+    async def get_cached_recipe(self, url: str) -> Optional[Dict]:
+        """Cache'den tarif getir"""
+        if not self.collection:
+            return None
+        
+        url_hash = self.get_url_hash(url)
+        cached = await self.collection.find_one({"url_hash": url_hash})
+        
+        if cached:
+            # MongoDB ObjectId'yi kaldır
+            cached.pop('_id', None)
+            return cached
+        
+        return None
+    
+    async def save_recipe(self, url: str, recipe_data: Dict) -> bool:
+        """Tarifi cache'e kaydet"""
+        if not self.collection:
+            return False
+        
+        url_hash = self.get_url_hash(url)
+        
+        document = {
+            "url_hash": url_hash,
+            "url": url,
+            "recipe": recipe_data,
+            "cached_at": datetime.now().isoformat(),
+            "access_count": 1
+        }
+        
+        # Upsert: varsa güncelle, yoksa ekle
+        await self.collection.update_one(
+            {"url_hash": url_hash},
+            {
+                "$set": document,
+                "$inc": {"access_count": 1}
+            },
+            upsert=True
+        )
+        
+        return True
+    
+    async def get_stats(self) -> Dict:
+        """Cache istatistikleri"""
+        if not self.collection:
+            return {"total_recipes": 0, "total_accesses": 0}
+        
+        total = await self.collection.count_documents({})
+        pipeline = [
+            {"$group": {"_id": None, "total_accesses": {"$sum": "$access_count"}}}
+        ]
+        result = await self.collection.aggregate(pipeline).to_list(1)
+        total_accesses = result[0]["total_accesses"] if result else 0
+        
+        return {
+            "total_recipes": total,
+            "total_accesses": total_accesses
+        }
 
 
 # ==================== RECIPE PARSER ====================
@@ -284,44 +463,140 @@ class RecipeParser:
         return ingredients
     
     def parse_steps(self, text: str) -> List[RecipeStep]:
-        """Adımları parse et"""
+        """Adımları parse et - gelişmiş versiyon"""
         steps = []
         lines = text.split('\n')
         order = 1
         
         # Türkçe yemek fiilleri
-        verbs = [
+        action_verbs = [
             'karıştır', 'ekle', 'dök', 'pişir', 'çırp', 'ısıt', 'doğra',
             'ren', 'kes', 'yoğur', 'beklet', 'dinlendir', 'al', 'koy',
             'ilave', 'hazırla', 'yıka', 'temizle', 'soy', 'dilimle',
             'kavur', 'haşla', 'kaynat', 'kızart', 'servis', 'süsle',
-            'tat', 'kontrol', 'çevir', 'karış', 'yap', 'oluştur'
+            'tat', 'kontrol', 'çevir', 'karış', 'yap', 'oluştur',
+            'geçir', 'oturt', 'tut', 'aç', 'kapat', 'doldur', 'kaynay',
+            'soğu', 'eritil', 'düzleştir', 'kaldır'
+        ]
+        
+        # Malzeme başlıkları - bunları atla
+        ingredient_headers = [
+            'malzemeler', 'malzeme:', 'için malzemeler', 'tabanı için',
+            'dolgu için', 'sos için', 'üzeri için', 'sosu için'
+        ]
+        
+        # Miktar ifadeleri - bunlar malzeme satırı
+        quantity_patterns = [
+            r'^\d+\s*(adet|su bardağı|yemek kaşığı|çay kaşığı|paket|kg|gr|g|ml|lt|l)',
+            r'^(yarım|bir|iki|üç|dört|beş)\s*(su bardağı|yemek kaşığı|çay kaşığı)',
+            r'^\d+/\d+\s*'
         ]
         
         for line in lines:
             line = line.strip()
+            
+            # Çok kısa satırları atla
             if not line or len(line) < 10:
                 continue
             
-            # Fiil içeren ve yeterince uzun cümleler
-            if any(verb in line.lower() for verb in verbs):
-                # Süre bilgisi
-                duration_match = re.search(r'(\d+)\s*(dakika|saat|saniye)', line, re.IGNORECASE)
-                duration = duration_match.group(0) if duration_match else None
+            line_lower = line.lower()
+            
+            # Malzeme başlıklarını atla
+            if any(header in line_lower for header in ingredient_headers):
+                continue
+            
+            # Miktar içeren satırları atla (malzeme listesi)
+            is_ingredient = False
+            for pattern in quantity_patterns:
+                if re.match(pattern, line, re.IGNORECASE):
+                    is_ingredient = True
+                    break
+            
+            if is_ingredient:
+                continue
+            
+            # Sadece parantez içi ipucu olan satırları atla
+            if line.startswith('(') and line.endswith(')'):
+                continue
+            
+            # Fiil içeren ve yeterince uzun cümleler = adım
+            if any(verb in line_lower for verb in action_verbs):
+                # Uzun paragrafları cümlelere böl
+                sentences = self._split_long_paragraph(line)
                 
-                # İpucu bilgisi (parantez içi)
-                tip_match = re.search(r'\(([^)]+)\)', line)
-                tip = tip_match.group(1) if tip_match else None
-                
-                steps.append(RecipeStep(
-                    order=order,
-                    text=line,
-                    duration=duration,
-                    tip=tip
-                ))
-                order += 1
+                for sentence in sentences:
+                    sentence = sentence.strip()
+                    if len(sentence) < 15:  # Çok kısa cümleleri atla
+                        continue
+                    
+                    # Süre bilgisi
+                    duration = self._extract_duration(sentence)
+                    
+                    # İpucu bilgisi (parantez içi)
+                    tip = self._extract_tip(sentence)
+                    
+                    steps.append(RecipeStep(
+                        order=order,
+                        text=sentence,
+                        duration=duration,
+                        tip=tip
+                    ))
+                    order += 1
         
         return steps
+    
+    def _split_long_paragraph(self, text: str) -> List[str]:
+        """Uzun paragrafları mantıklı cümlelere böl"""
+        # Eğer çok uzun değilse bölme
+        if len(text) < 150:
+            return [text]
+        
+        sentences = []
+        
+        # Nokta ile bölme (ama sayılardan sonraki noktaları atla)
+        parts = re.split(r'\.(?=\s+[A-ZÇĞIÖŞÜ])', text)
+        
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+            
+            # Hala çok uzunsa virgüllerden böl
+            if len(part) > 200:
+                subparts = part.split('.')
+                for subpart in subparts:
+                    subpart = subpart.strip()
+                    if len(subpart) > 30:
+                        sentences.append(subpart)
+            else:
+                sentences.append(part)
+        
+        return sentences if sentences else [text]
+    
+    def _extract_duration(self, text: str) -> Optional[str]:
+        """Metinden süre bilgisini çıkar"""
+        # Süre pattern'leri
+        patterns = [
+            r'(\d+)\s*-?\s*(\d+)?\s*(dakika|dk|saat|saniye)',
+            r'(\d+)\s*(gece|saat)',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return match.group(0)
+        
+        return None
+    
+    def _extract_tip(self, text: str) -> Optional[str]:
+        """Metinden ipucu bilgisini çıkar (parantez içi)"""
+        tip_match = re.search(r'\(([^)]+)\)', text)
+        if tip_match:
+            tip = tip_match.group(1).strip()
+            # Sadece anlamlı ipuçlarını al
+            if len(tip) > 10 and not tip[0].isdigit():
+                return tip
+        return None
     
     def extract_title(self, text: str) -> str:
         """Tarif başlığını çıkar"""
@@ -371,11 +646,14 @@ class RecipeParser:
 class RecipeService:
     """Ana tarif servisi"""
     
-    def __init__(self):
-        self.instagram_scraper = InstagramScraper()
-        self.tiktok_scraper = TikTokScraper()
-        self.youtube_scraper = YouTubeScraper()
+    def __init__(self, db=None, openai_api_key: str = "", proxy_url: Optional[str] = None):
+        self.instagram_scraper = InstagramScraper(proxy_url=proxy_url)
+        self.tiktok_scraper = TikTokScraper(proxy_url=proxy_url)
+        self.youtube_scraper = YouTubeScraper(proxy_url=proxy_url)
         self.parser = RecipeParser()
+        self.ai_parser = AIRecipeParser(openai_api_key)
+        self.db_helper = DatabaseHelper(db)
+        self.proxy_url = proxy_url
     
     def detect_platform(self, url: str) -> str:
         """Platform tespit et"""
@@ -400,37 +678,69 @@ class RecipeService:
         else:
             raise ValueError('Desteklenmeyen platform')
     
-    def parse_recipe(self, url: str) -> Recipe:
-        """URL'den tarif çıkar"""
+    async def parse_recipe(self, url: str, use_ai: bool = False) -> Recipe:
+        """URL'den tarif çıkar (cache + AI destekli)"""
         
-        # Platform tespit
+        # 1. Cache kontrolü
+        cached = await self.db_helper.get_cached_recipe(url)
+        if cached:
+            print(f"✅ Cache'den döndürüldü: {url}")
+            return Recipe(**cached['recipe'])
+        
+        # 2. Platform tespit
         platform = self.detect_platform(url)
         
-        # İçerik çek
+        # 3. İçerik çek
         content = self.scrape_content(url, platform)
-        
-        # Parse et
         caption = content['caption']
-        title = self.parser.extract_title(caption)
-        ingredients = self.parser.parse_ingredients(caption)
-        steps = self.parser.parse_steps(caption)
         
-        # Süre bilgileri
-        duration_match = re.search(r'(\d+)\s*dakika', caption, re.IGNORECASE)
-        total_duration = duration_match.group(0) if duration_match else None
+        # 4. Parse et (AI veya Regex)
+        if use_ai and self.ai_parser.enabled:
+            print(f"🤖 AI ile parsing: {url}")
+            try:
+                ai_result = await self.ai_parser.parse_with_ai(caption, platform)
+                
+                # AI sonucunu Recipe formatına dönüştür
+                ingredients = [Ingredient(**ing) for ing in ai_result.get('ingredients', [])]
+                steps = [RecipeStep(**step) for step in ai_result.get('steps', [])]
+                title = ai_result.get('title', 'Tarif')
+                total_duration = ai_result.get('total_duration')
+                difficulty = ai_result.get('difficulty', 'Orta')
+                servings = ai_result.get('servings')
+                
+            except Exception as e:
+                print(f"⚠️ AI parsing başarısız, regex'e geçiliyor: {e}")
+                # AI başarısız olursa regex'e düş
+                title = self.parser.extract_title(caption)
+                ingredients = self.parser.parse_ingredients(caption)
+                steps = self.parser.parse_steps(caption)
+                duration_match = re.search(r'(\d+)\s*dakika', caption, re.IGNORECASE)
+                total_duration = duration_match.group(0) if duration_match else None
+                difficulty = self.parser.extract_difficulty(caption)
+                servings = self.parser.extract_servings(caption)
+        else:
+            print(f"📝 Regex ile parsing: {url}")
+            # Standart regex parsing
+            title = self.parser.extract_title(caption)
+            ingredients = self.parser.parse_ingredients(caption)
+            steps = self.parser.parse_steps(caption)
+            duration_match = re.search(r'(\d+)\s*dakika', caption, re.IGNORECASE)
+            total_duration = duration_match.group(0) if duration_match else None
+            difficulty = self.parser.extract_difficulty(caption)
+            servings = self.parser.extract_servings(caption)
         
-        # Hashtag'ler
+        # 5. Hashtag'ler
         hashtags = re.findall(r'#(\w+)', caption)
         
-        # Recipe oluştur
-        return Recipe(
+        # 6. Recipe oluştur
+        recipe = Recipe(
             title=title,
             description=caption[:200] + '...' if len(caption) > 200 else caption,
             ingredients=ingredients,
             steps=steps,
             total_duration=total_duration,
-            difficulty=self.parser.extract_difficulty(caption),
-            servings=self.parser.extract_servings(caption),
+            difficulty=difficulty,
+            servings=servings,
             source_url=url,
             source_platform=platform,
             video_duration=content.get('video_duration'),
@@ -442,10 +752,53 @@ class RecipeService:
             hashtags=hashtags if hashtags else None,
             created_at=datetime.now().isoformat()
         )
+        
+        # 7. Cache'e kaydet
+        await self.db_helper.save_recipe(url, recipe.dict())
+        print(f"💾 Cache'e kaydedildi: {url}")
+        
+        return recipe
 
 
-# Initialize service
-service = RecipeService()
+# Service will be initialized on startup
+service = None
+
+
+# ==================== STARTUP/SHUTDOWN ====================
+
+@app.on_event("startup")
+async def startup_db_client():
+    """MongoDB bağlantısını başlat"""
+    global mongo_client, db, service
+    
+    try:
+        mongo_client = AsyncIOMotorClient(MONGODB_URL)
+        db = mongo_client[MONGODB_DB_NAME]
+        
+        # Test connection
+        await db.command('ping')
+        print(f"✅ MongoDB bağlantısı başarılı: {MONGODB_DB_NAME}")
+        
+        # Create index for faster lookups
+        await db.recipes.create_index("url_hash", unique=True)
+        
+    except Exception as e:
+        print(f"⚠️ MongoDB bağlantısı başarısız: {e}")
+        print("⚠️ Cache olmadan devam ediliyor...")
+        db = None
+    
+    # Initialize service with DB and proxy
+    service = RecipeService(db=db, openai_api_key=OPENAI_API_KEY, proxy_url=PROXY_URL if PROXY_ENABLED else None)
+    print(f"🚀 RecipeService başlatıldı (AI: {service.ai_parser.enabled}, Proxy: {PROXY_ENABLED})")
+
+
+@app.on_event("shutdown")
+async def shutdown_db_client():
+    """MongoDB bağlantısını kapat"""
+    global mongo_client
+    if mongo_client:
+        mongo_client.close()
+        print("👋 MongoDB bağlantısı kapatıldı")
 
 
 # ==================== API ENDPOINTS ====================
@@ -475,15 +828,28 @@ async def parse_recipe(request: RecipeRequest):
     """
     Instagram, TikTok veya YouTube Shorts URL'den tarif çıkar
     
+    **Yeni Özellikler:**
+    - ✅ MongoDB cache (aynı URL tekrar istenirse cache'den döner)
+    - ✅ AI-powered parsing (use_ai: true ile)
+    
     **Desteklenen Platformlar:**
     - Instagram (Reels, Posts)
     - TikTok
     - YouTube Shorts
     
-    **Örnek Request:**
+    **Örnek Request (Normal):**
     ```json
     {
-        "url": "https://www.instagram.com/p/ABC123/"
+        "url": "https://www.instagram.com/p/ABC123/",
+        "use_ai": false
+    }
+    ```
+    
+    **Örnek Request (AI ile):**
+    ```json
+    {
+        "url": "https://www.instagram.com/p/ABC123/",
+        "use_ai": true
     }
     ```
     
@@ -496,12 +862,13 @@ async def parse_recipe(request: RecipeRequest):
             "ingredients": [...],
             "steps": [...],
             ...
-        }
+        },
+        "message": "Tarif başarıyla çıkarıldı"
     }
     ```
     """
     try:
-        recipe = service.parse_recipe(request.url)
+        recipe = await service.parse_recipe(request.url, use_ai=request.use_ai)
         
         return RecipeResponse(
             success=True,
@@ -544,6 +911,29 @@ async def supported_platforms():
                 "example": "https://www.youtube.com/shorts/ABC123"
             }
         ]
+    }
+
+
+@app.get("/api/v1/cache/stats")
+async def cache_stats():
+    """
+    Cache istatistiklerini getir
+    
+    **Response:**
+    ```json
+    {
+        "total_recipes": 150,
+        "total_accesses": 1250,
+        "cache_enabled": true,
+        "ai_enabled": true
+    }
+    ```
+    """
+    stats = await service.db_helper.get_stats()
+    return {
+        **stats,
+        "cache_enabled": db is not None,
+        "ai_enabled": service.ai_parser.enabled
     }
 
 

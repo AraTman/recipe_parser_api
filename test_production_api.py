@@ -12,7 +12,7 @@ API_URL = "http://localhost:8001"
 
 # Test URLs
 TEST_URLS = {
-    "instagram": "https://www.instagram.com/p/DPMHtPKiHqp/",  # Havuçlu kek
+    "instagram": "https://www.instagram.com/reel/DNX8U4tMR_P/?igsh=MWd6ZzQ3M2NoYnlpdg==",  # Havuçlu kek
     "youtube": "https://www.youtube.com/shorts/example123",  # YouTube short
     "tiktok": "https://www.tiktok.com/@user/video/123456",  # TikTok video
 }
