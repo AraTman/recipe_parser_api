@@ -2,10 +2,10 @@
 
 Instagram, TikTok ve YouTube Shorts'tan yemek tariflerini otomatik çıkaran production-ready REST API.
 
-## ✨ Yeni Özellikler (v2.0)
+## ✨ Özellikler (v2.0)
 
 - ✅ **MongoDB Cache:** Aynı URL tekrar istenırse cache'den hızlıca döner
-- 🤖 **AI-Powered Parsing:** OpenAI GPT ile gelişmiş tarif analizi (isteğe bağlı)
+- 🤖 **n8n Entegrasyonu:** AI parsing ve otomasyon için n8n workflow desteği
 - 📊 **Cache İstatistikleri:** Toplam tarif ve erişim sayısı takibi
 - 🚀 **Async Architecture:** Daha hızlı ve ölçeklenebilir
 - 🔒 **Proxy Support:** Rate limit ve engelleri aşmak için proxy desteği
