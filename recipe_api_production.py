@@ -359,7 +359,7 @@ class DatabaseHelper:
     
     async def get_cached_recipe(self, url: str) -> Optional[Dict]:
         """Cache'den tarif getir"""
-        if not self.collection:
+        if self.collection is None:
             return None
         
         url_hash = self.get_url_hash(url)
@@ -374,7 +374,7 @@ class DatabaseHelper:
     
     async def save_recipe(self, url: str, recipe_data: Dict) -> bool:
         """Tarifi cache'e kaydet"""
-        if not self.collection:
+        if self.collection is None:
             return False
         
         url_hash = self.get_url_hash(url)
@@ -401,7 +401,7 @@ class DatabaseHelper:
     
     async def get_stats(self) -> Dict:
         """Cache istatistikleri"""
-        if not self.collection:
+        if self.collection is None:
             return {"total_recipes": 0, "total_accesses": 0}
         
         total = await self.collection.count_documents({})
