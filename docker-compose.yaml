@@ -1,0 +1,92 @@
+version: '3.8'
+
+services:
+  # Recipe Parser API
+  recipe-api:
+    build: .
+    container_name: recipe-parser-api
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    environment:
+      - API_HOST=0.0.0.0
+      - API_PORT=8001
+      - LOG_LEVEL=INFO
+      - MONGODB_URL=mongodb://mongodb:27017
+      - MONGODB_DB_NAME=recipe_parser
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ENABLE_AI_PARSING=${ENABLE_AI_PARSING:-false}
+      - PROXY_URL=${PROXY_URL:-}
+      - N8N_WEBHOOK_URL=${N8N_WEBHOOK_URL:-}
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - recipe-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # MongoDB Database
+  mongodb:
+    image: mongo:7
+    container_name: recipe-mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGO_INITDB_DATABASE=recipe_parser
+    volumes:
+      - mongodb_data:/data/db
+      - mongodb_config:/data/configdb
+    networks:
+      - recipe-network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # n8n Workflow Automation
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: recipe-n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_HOST=${N8N_HOST:-localhost}
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=${N8N_PROTOCOL:-http}
+      - NODE_ENV=production
+      - WEBHOOK_URL=${WEBHOOK_URL:-http://localhost:5678}
+      - GENERIC_TIMEZONE=${TIMEZONE:-Europe/Istanbul}
+      - N8N_BASIC_AUTH_ACTIVE=${N8N_BASIC_AUTH_ACTIVE:-true}
+      - N8N_BASIC_AUTH_USER=${N8N_BASIC_AUTH_USER:-admin}
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_BASIC_AUTH_PASSWORD:-changeme}
+    volumes:
+      - n8n_data:/home/node/.n8n
+    networks:
+      - recipe-network
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:5678/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  mongodb_data:
+    driver: local
+  mongodb_config:
+    driver: local
+  n8n_data:
+    driver: local
+
+networks:
+  recipe-network:
+    driver: bridge
