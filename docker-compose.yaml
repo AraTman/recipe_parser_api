@@ -19,16 +19,15 @@ services:
       - PROXY_URL=${PROXY_URL:-}
       - N8N_WEBHOOK_URL=${N8N_WEBHOOK_URL:-}
     depends_on:
-      mongodb:
-        condition: service_healthy
+      - mongodb
     networks:
       - recipe-network
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
       interval: 30s
       timeout: 10s
-      retries: 3
-      start_period: 10s
+      retries: 5
+      start_period: 40s
 
   # MongoDB Database
   mongodb:
