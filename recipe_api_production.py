@@ -379,23 +379,31 @@ class DatabaseHelper:
         
         url_hash = self.get_url_hash(url)
         
-        document = {
-            "url_hash": url_hash,
-            "url": url,
-            "recipe": recipe_data,
-            "cached_at": datetime.now().isoformat(),
-            "access_count": 1
-        }
+        # Önce var mı kontrol et
+        existing = await self.collection.find_one({"url_hash": url_hash})
         
-        # Upsert: varsa güncelle, yoksa ekle
-        await self.collection.update_one(
-            {"url_hash": url_hash},
-            {
-                "$set": document,
-                "$inc": {"access_count": 1}
-            },
-            upsert=True
-        )
+        if existing:
+            # Varsa sadece recipe'yi güncelle ve access_count'u artır
+            await self.collection.update_one(
+                {"url_hash": url_hash},
+                {
+                    "$set": {
+                        "recipe": recipe_data,
+                        "cached_at": datetime.now().isoformat()
+                    },
+                    "$inc": {"access_count": 1}
+                }
+            )
+        else:
+            # Yoksa yeni döküman ekle
+            document = {
+                "url_hash": url_hash,
+                "url": url,
+                "recipe": recipe_data,
+                "cached_at": datetime.now().isoformat(),
+                "access_count": 1
+            }
+            await self.collection.insert_one(document)
         
         return True
     
