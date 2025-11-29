@@ -22,6 +22,13 @@ services:
       - mongodb
     networks:
       - recipe-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.recipe-api.rule=Host(`recipe-api.masalormani.com`)"
+      - "traefik.http.routers.recipe-api.entrypoints=websecure"
+      - "traefik.http.routers.recipe-api.tls=true"
+      - "traefik.http.routers.recipe-api.tls.certresolver=letsencrypt"
+      - "traefik.http.services.recipe-api.loadbalancer.server.port=8001"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
       interval: 30s
