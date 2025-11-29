@@ -6,7 +6,7 @@ Instagram, TikTok, YouTube Shorts destekli tarif çıkarma API'si
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, validator
+from pydantic import BaseModel, field_validator
 from typing import List, Optional, Dict
 import re
 import instaloader
@@ -88,7 +88,8 @@ class RecipeRequest(BaseModel):
     url: str
     use_ai: Optional[bool] = False  # AI-powered parsing kullan
     
-    @validator('url')
+    @field_validator('url')
+    @classmethod
     def validate_url(cls, v):
         if not any(platform in v.lower() for platform in ['instagram.com', 'tiktok.com', 'youtube.com', 'youtu.be']):
             raise ValueError('Sadece Instagram, TikTok veya YouTube linkleri desteklenir')
@@ -350,7 +351,7 @@ class DatabaseHelper:
     
     def __init__(self, db):
         self.db = db
-        self.collection = db.recipes if db else None
+        self.collection = db.recipes if db is not None else None
     
     def get_url_hash(self, url: str) -> str:
         """URL'den unique hash oluştur"""
