@@ -17,6 +17,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 import hashlib
 import json
+import google.generativeai as genai
 
 # Load environment variables
 load_dotenv()
@@ -37,6 +38,10 @@ PROXY_ENABLED = bool(PROXY_URL)
 
 # n8n webhook (optional)
 N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL", "")
+
+# Google AI (Gemini) settings
+GOOGLE_AI_API_KEY = os.getenv("GOOGLE_AI_API_KEY", "")
+USE_AI_PARSING = os.getenv("USE_AI_PARSING", "true").lower() == "true"
 
 mongo_client = None
 db = None
@@ -284,8 +289,90 @@ class YouTubeScraper:
             }
 
 
-# ==================== AI PARSER (Removed - Use n8n instead) ====================
-# AI parsing artık n8n workflow'larında yapılacak
+# ==================== AI PARSER (Google Gemini) ====================
+
+class AIRecipeParser:
+    """Google Gemini ile tarif parsing"""
+    
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self.model = None
+        if api_key:
+            try:
+                genai.configure(api_key=api_key)
+                self.model = genai.GenerativeModel('gemini-1.5-flash')
+            except Exception as e:
+                print(f"⚠️ Google AI initialization failed: {e}")
+    
+    def parse_recipe(self, raw_text: str, title: str = "") -> Dict:
+        """
+        Google Gemini ile tarifi parse et
+        """
+        if not self.model:
+            raise ValueError("Google AI API key not configured")
+        
+        prompt = f"""Sen bir yemek tarifi uzmanısın. Aşağıdaki tarif metnini analiz et ve yapılandırılmış formata çevir.
+
+=== TARİF METNİ ===
+Başlık: {title}
+
+{raw_text}
+
+=== GÖREV ===
+1. Türkçe ve İngilizce karışık ise sadece Türkçe kısmı al
+2. Malzemeleri standartlaştır (miktar, birim, isim)
+3. Adımları net ve sıralı hale getir
+4. Gereksiz tekrarları temizle
+5. Tahmini süre ve zorluk belirle
+
+=== ÇIKTI FORMATI ===
+Sadece JSON formatında döndür:
+
+{{
+  "title": "Kısa ve net başlık (Türkçe)",
+  "description": "2-3 cümle açıklama",
+  "ingredients": [
+    {{"item": "Malzeme adı", "amount": "Miktar", "unit": "Birim"}}
+  ],
+  "steps": [
+    {{"order": 1, "text": "Adım açıklaması", "duration": "Süre (opsiyonel)"}}
+  ],
+  "total_duration": "Toplam süre (örn: 45 dakika)",
+  "prep_time": "Hazırlık süresi",
+  "cook_time": "Pişirme süresi",
+  "difficulty": "Kolay/Orta/Zor",
+  "servings": "Porsiyon (örn: 4 kişilik)",
+  "tips": ["İpucu 1", "İpucu 2"]
+}}
+
+Sadece JSON döndür, başka açıklama ekleme."""
+
+        try:
+            response = self.model.generate_content(
+                prompt,
+                generation_config=genai.types.GenerationConfig(
+                    temperature=0.3,
+                    max_output_tokens=2048,
+                )
+            )
+            
+            # JSON parse et
+            result_text = response.text.strip()
+            # Markdown code block temizle
+            result_text = re.sub(r'```json\n?', '', result_text)
+            result_text = re.sub(r'```\n?', '', result_text)
+            result_text = result_text.strip()
+            
+            parsed = json.loads(result_text)
+            return parsed
+            
+        except json.JSONDecodeError as e:
+            print(f"⚠️ AI JSON parse error: {e}")
+            print(f"Raw response: {response.text[:500]}")
+            raise ValueError(f"AI yanıtı JSON formatında değil: {e}")
+        except Exception as e:
+            print(f"⚠️ AI parsing error: {e}")
+            raise ValueError(f"AI parsing hatası: {e}")
 
 
 # ==================== DATABASE HELPER ====================
@@ -599,11 +686,12 @@ class RecipeParser:
 class RecipeService:
     """Ana tarif servisi"""
     
-    def __init__(self, db=None, proxy_url: Optional[str] = None):
+    def __init__(self, db=None, proxy_url: Optional[str] = None, ai_parser: Optional[AIRecipeParser] = None):
         self.instagram_scraper = InstagramScraper(proxy_url=proxy_url)
         self.tiktok_scraper = TikTokScraper(proxy_url=proxy_url)
         self.youtube_scraper = YouTubeScraper(proxy_url=proxy_url)
         self.parser = RecipeParser()
+        self.ai_parser = ai_parser
         self.db_helper = DatabaseHelper(db)
         self.proxy_url = proxy_url
     
@@ -630,8 +718,12 @@ class RecipeService:
         else:
             raise ValueError('Desteklenmeyen platform')
     
-    async def parse_recipe(self, url: str) -> Recipe:
-        """URL'den tarif çıkar (cache destekli)"""
+    async def parse_recipe(self, url: str, use_ai: bool = None) -> Recipe:
+        """URL'den tarif çıkar (cache destekli, AI parsing opsiyonel)"""
+        
+        # use_ai parametresi verilmemişse global ayarı kullan
+        if use_ai is None:
+            use_ai = USE_AI_PARSING and self.ai_parser is not None
         
         # 1. Cache kontrolü
         cached = await self.db_helper.get_cached_recipe(url)
@@ -646,15 +738,57 @@ class RecipeService:
         content = self.scrape_content(url, platform)
         caption = content['caption']
         
-        # 4. Parse et (Regex ile - AI parsing n8n'de yapılacak)
-        print(f"📝 Regex ile parsing: {url}")
-        title = self.parser.extract_title(caption)
-        ingredients = self.parser.parse_ingredients(caption)
-        steps = self.parser.parse_steps(caption)
-        duration_match = re.search(r'(\d+)\s*dakika', caption, re.IGNORECASE)
-        total_duration = duration_match.group(0) if duration_match else None
-        difficulty = self.parser.extract_difficulty(caption)
-        servings = self.parser.extract_servings(caption)
+        # 4. Parse et
+        if use_ai and self.ai_parser:
+            # AI ile parse et
+            print(f"🤖 Google AI ile parsing: {url}")
+            try:
+                ai_result = self.ai_parser.parse_recipe(caption, content.get('owner_username', ''))
+                
+                # AI sonucunu Recipe formatına çevir
+                ingredients = [
+                    Ingredient(
+                        item=ing.get('item', ''),
+                        amount=ing.get('amount'),
+                        unit=ing.get('unit')
+                    ) for ing in ai_result.get('ingredients', [])
+                ]
+                
+                steps = [
+                    RecipeStep(
+                        order=step.get('order', i+1),
+                        text=step.get('text', ''),
+                        duration=step.get('duration'),
+                        tip=None
+                    ) for i, step in enumerate(ai_result.get('steps', []))
+                ]
+                
+                title = ai_result.get('title', self.parser.extract_title(caption))
+                description = ai_result.get('description', caption[:200] + '...' if len(caption) > 200 else caption)
+                total_duration = ai_result.get('total_duration')
+                prep_time = ai_result.get('prep_time')
+                cook_time = ai_result.get('cook_time')
+                difficulty = ai_result.get('difficulty', 'Orta')
+                servings = ai_result.get('servings')
+                
+            except Exception as e:
+                print(f"⚠️ AI parsing başarısız, regex'e geçiliyor: {e}")
+                # AI başarısız olursa regex'e düş
+                use_ai = False
+        
+        if not use_ai or not self.ai_parser:
+            # Regex ile parse et
+            print(f"📝 Regex ile parsing: {url}")
+            title = self.parser.extract_title(caption)
+            description = caption[:200] + '...' if len(caption) > 200 else caption
+            ingredients = self.parser.parse_ingredients(caption)
+            steps = self.parser.parse_steps(caption)
+            duration_match = re.search(r'(\d+)\s*dakika', caption, re.IGNORECASE)
+            total_duration = duration_match.group(0) if duration_match else None
+            prep_time = None
+            cook_time = None
+            difficulty = self.parser.extract_difficulty(caption)
+            servings = self.parser.extract_servings(caption)
         
         # 5. Hashtag'ler
         hashtags = re.findall(r'#(\w+)', caption)
@@ -662,10 +796,12 @@ class RecipeService:
         # 6. Recipe oluştur
         recipe = Recipe(
             title=title,
-            description=caption[:200] + '...' if len(caption) > 200 else caption,
+            description=description,
             ingredients=ingredients,
             steps=steps,
             total_duration=total_duration,
+            prep_time=prep_time,
+            cook_time=cook_time,
             difficulty=difficulty,
             servings=servings,
             source_url=url,
@@ -714,9 +850,21 @@ async def startup_db_client():
         print("⚠️ Cache olmadan devam ediliyor...")
         db = None
     
-    # Initialize service with DB and proxy
-    service = RecipeService(db=db, proxy_url=PROXY_URL if PROXY_ENABLED else None)
-    print(f"🚀 RecipeService başlatıldı (Proxy: {PROXY_ENABLED})")
+    # Initialize AI parser if API key exists
+    ai_parser = None
+    if GOOGLE_AI_API_KEY:
+        ai_parser = AIRecipeParser(api_key=GOOGLE_AI_API_KEY)
+        print(f"🤖 Google AI Parser başlatıldı (AI Parsing: {USE_AI_PARSING})")
+    else:
+        print("⚠️ Google AI API key bulunamadı, regex parsing kullanılacak")
+    
+    # Initialize service with DB, proxy and AI parser
+    service = RecipeService(
+        db=db, 
+        proxy_url=PROXY_URL if PROXY_ENABLED else None,
+        ai_parser=ai_parser
+    )
+    print(f"🚀 RecipeService başlatıldı (Proxy: {PROXY_ENABLED}, AI: {ai_parser is not None})")
 
 
 @app.on_event("shutdown")
