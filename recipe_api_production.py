@@ -312,7 +312,8 @@ class AIRecipeParser:
         if api_key:
             try:
                 genai.configure(api_key=api_key)
-                self.model = genai.GenerativeModel('gemini-1.5-flash')
+                # Gemini Pro modeli kullan (ücretsiz ve stabil)
+                self.model = genai.GenerativeModel('gemini-2.5-flash')
             except Exception as e:
                 print(f"⚠️ Google AI initialization failed: {e}")
     
@@ -874,7 +875,7 @@ class RecipeService:
         
         # 7. Cache'e kaydet (dil bazlı)
         cache_key = f"{url}_{language}"
-        await self.db_helper.save_recipe(cache_key, recipe.dict())
+        await self.db_helper.save_recipe(cache_key, recipe.model_dump())
         print(f"💾 Cache'e kaydedildi: {url} ({language})")
         
         # use_ai değişkeni son durumu gösterir (AI başarısız olduysa False'a dönmüş olur)
