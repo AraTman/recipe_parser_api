@@ -17,6 +17,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 import hashlib
 import json
+import asyncio
 import google.generativeai as genai
 
 # Load environment variables
@@ -892,20 +893,32 @@ async def startup_db_client():
     global mongo_client, db, service
     
     try:
-        mongo_client = AsyncIOMotorClient(MONGODB_URL)
+        # MongoDB bağlantısı timeout ile (5 saniye)
+        mongo_client = AsyncIOMotorClient(
+            MONGODB_URL,
+            serverSelectionTimeoutMS=5000,
+            connectTimeoutMS=5000
+        )
         db = mongo_client[MONGODB_DB_NAME]
         
-        # Test connection
-        await db.command('ping')
+        # Test connection with timeout
+        await asyncio.wait_for(db.command('ping'), timeout=5.0)
         print(f"✅ MongoDB bağlantısı başarılı: {MONGODB_DB_NAME}")
         
-        # Create index for faster lookups
-        await db.recipes.create_index("url_hash", unique=True)
+        # Create index for faster lookups (non-blocking)
+        try:
+            await asyncio.wait_for(
+                db.recipes.create_index("url_hash", unique=True),
+                timeout=3.0
+            )
+        except asyncio.TimeoutError:
+            print("⚠️ Index oluşturma timeout, devam ediliyor...")
         
-    except Exception as e:
+    except (Exception, asyncio.TimeoutError) as e:
         print(f"⚠️ MongoDB bağlantısı başarısız: {e}")
         print("⚠️ Cache olmadan devam ediliyor...")
         db = None
+        mongo_client = None
     
     # Initialize AI parser if API key exists
     ai_parser = None
