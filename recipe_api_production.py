@@ -925,7 +925,9 @@ async def startup_db_client():
     ai_parser = None
     if GOOGLE_AI_API_KEY:
         ai_parser = AIRecipeParser(api_key=GOOGLE_AI_API_KEY)
-        print(f"🤖 Google AI Parser başlatıldı (AI Parsing: {USE_AI_PARSING})")
+        # API key'in son 5 hanesini göster (güvenlik için)
+        key_preview = f"...{GOOGLE_AI_API_KEY[-5:]}" if len(GOOGLE_AI_API_KEY) >= 5 else "***"
+        print(f"🤖 Google AI Parser başlatıldı (AI Parsing: {USE_AI_PARSING}, Key: {key_preview})")
     else:
         print("⚠️ Google AI API key bulunamadı, regex parsing kullanılacak")
     
