@@ -24,7 +24,7 @@ services:
       - recipe-network
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.recipe-api.rule=Host(`recipe-api.masalormani.com`)"
+      - "traefik.http.routers.recipe-api.rule=Host(`recipe.milyemplus.cloud`)"
       - "traefik.http.routers.recipe-api.entrypoints=websecure"
       - "traefik.http.routers.recipe-api.tls=true"
       - "traefik.http.routers.recipe-api.tls.certresolver=letsencrypt"
