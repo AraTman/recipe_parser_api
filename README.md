@@ -1,15 +1,16 @@
-# 🍳 Recipe Parser API v2.0
+# 🍳 Recipe Parser API v3.0
 
 Instagram, TikTok ve YouTube Shorts'tan yemek tariflerini otomatik çıkaran production-ready REST API.
 
-## ✨ Özellikler (v2.0)
+## ✨ Özellikler (v3.0)
 
-- ✅ **MongoDB Cache:** Aynı URL tekrar istenırse cache'den hızlıca döner
-- 🤖 **n8n Entegrasyonu:** AI parsing ve otomasyon için n8n workflow desteği
+- 🤖 **Google AI (Gemini) Parsing:** Akıllı tarif çıkarma ve düzenleme
+- 🌍 **Çok Dilli Destek:** 11 farklı dilde tarif çevirisi (TR, EN, DE, FR, ES, IT, AR, RU, ZH, JA, KO)
+- ✅ **MongoDB Cache:** Dil bazlı cache sistemi
 - 📊 **Cache İstatistikleri:** Toplam tarif ve erişim sayısı takibi
 - 🚀 **Async Architecture:** Daha hızlı ve ölçeklenebilir
 - 🔒 **Proxy Support:** Rate limit ve engelleri aşmak için proxy desteği
-- 🎯 **Gelişmiş Adım Parsing:** Malzeme/adım ayrımı, uzun paragraf bölme
+- 🎯 **Akıllı Parsing:** AI ile malzeme standartlaştırma ve adım düzenleme
 
 ## 🚀 Hızlı Başlangıç
 
@@ -30,8 +31,10 @@ pip install -r requirements.txt
 # Docker: docker run -d -p 27017:27017 mongo
 
 # .env dosyası oluştur
-cp .env.example .env
-# .env dosyasını düzenle (MongoDB URL, OpenAI API key)
+cp .env.docker .env
+# .env dosyasını düzenle (MongoDB URL, Google AI API key)
+nano .env
+# GOOGLE_AI_API_KEY=your_key_here ekle
 ```
 
 ### 2. API'yi Başlat
@@ -45,18 +48,20 @@ API şu adreste çalışacak: `http://localhost:8001`
 ### 3. Test Et
 
 ```bash
-# Otomatik testleri çalıştır
-python3 test_production_api.py
-
-# Manuel test (Normal parsing)
+# Türkçe tarif (varsayılan)
 curl -X POST http://localhost:8001/api/v1/parse-recipe \
   -H "Content-Type: application/json" \
-  -d '{"url": "https://www.instagram.com/p/ABC123/", "use_ai": false}'
+  -d '{"url": "https://www.instagram.com/reel/DRmSj6qjexh/"}'
 
-# Manuel test (AI parsing)
+# İngilizce tarif
 curl -X POST http://localhost:8001/api/v1/parse-recipe \
   -H "Content-Type: application/json" \
-  -d '{"url": "https://www.instagram.com/p/ABC123/", "use_ai": true}'
+  -d '{"url": "https://www.instagram.com/reel/DRmSj6qjexh/", "language": "en"}'
+
+# Almanca tarif
+curl -X POST http://localhost:8001/api/v1/parse-recipe \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://www.instagram.com/reel/DRmSj6qjexh/", "language": "de"}'
 
 # Cache istatistikleri
 curl http://localhost:8001/api/v1/cache/stats
@@ -75,15 +80,32 @@ curl http://localhost:8001/api/v1/cache/stats
 - ✅ **TikTok** (Videos)
 - ✅ **YouTube** (Shorts, Videos)
 
+## 🌍 Desteklenen Diller
+
+| Kod | Dil | Örnek |
+|-----|-----|-------|
+| `tr` | Türkçe | Varsayılan |
+| `en` | English | "Carrot Cake" |
+| `de` | Deutsch | "Karottenkuchen" |
+| `fr` | Français | "Gâteau aux carottes" |
+| `es` | Español | "Pastel de zanahoria" |
+| `it` | Italiano | "Torta di carote" |
+| `ar` | العربية | "كعكة الجزر" |
+| `ru` | Русский | "Морковный пирог" |
+| `zh` | 中文 | "胡萝卜蛋糕" |
+| `ja` | 日本語 | "キャロットケーキ" |
+| `ko` | 한국어 | "당근 케이크" |
+
 ## 📡 API Endpoints
 
-### Parse Recipe
+### Parse Recipe (Çok Dilli)
 ```http
 POST /api/v1/parse-recipe
 Content-Type: application/json
 
 {
-  "url": "https://www.instagram.com/p/ABC123/"
+  "url": "https://www.instagram.com/reel/ABC123/",
+  "language": "en"
 }
 ```
 
@@ -99,34 +121,52 @@ GET /api/v1/supported-platforms
 
 ## 📊 Response Format
 
+### Türkçe Tarif (language: "tr")
 ```json
 {
   "success": true,
   "recipe": {
-    "title": "Havuçlu Tarçınlı Kek",
+    "title": "Kıbrıs Köftesi",
+    "description": "Patates ve kıyma ile hazırlanan geleneksel Kıbrıs köftesi...",
     "ingredients": [
-      {
-        "item": "Yumurta",
-        "amount": "3",
-        "unit": "adet"
-      }
+      {"item": "Patates", "amount": "1", "unit": "kg"},
+      {"item": "Kıyma", "amount": "250", "unit": "g"}
     ],
     "steps": [
-      {
-        "order": 1,
-        "text": "Yumurta ve şekeri karıştırın",
-        "duration": null
-      }
+      {"order": 1, "text": "Patatesleri soyun ve rendeleyin..."}
     ],
-    "total_duration": "50 dakika",
-    "difficulty": "Orta",
-    "source_platform": "instagram",
-    "video_duration": 13.933,
-    "author_username": "chef_user",
-    "likes": 43420,
-    "hashtags": ["kek", "tarif"]
+    "total_duration": "45 dakika",
+    "prep_time": "20 dakika",
+    "cook_time": "25 dakika",
+    "difficulty": "Kolay",
+    "servings": "4 kişilik",
+    "tips": ["Köfte harcı ıslaksa galeta unu ekleyin"]
   },
-  "message": "Tarif başarıyla çıkarıldı"
+  "parsed_with_ai": true,
+  "message": "Tarif başarıyla çıkarıldı (AI ile, dil: tr)"
+}
+```
+
+### İngilizce Tarif (language: "en")
+```json
+{
+  "success": true,
+  "recipe": {
+    "title": "Cyprus Meatballs",
+    "description": "Traditional Cyprus meatballs made with potatoes and ground beef...",
+    "ingredients": [
+      {"item": "Potatoes", "amount": "1", "unit": "kg"},
+      {"item": "Ground beef", "amount": "250", "unit": "g"}
+    ],
+    "steps": [
+      {"order": 1, "text": "Peel and grate the potatoes..."}
+    ],
+    "difficulty": "Easy",
+    "servings": "4 servings",
+    "tips": ["Add breadcrumbs if mixture is too wet"]
+  },
+  "parsed_with_ai": true,
+  "message": "Tarif başarıyla çıkarıldı (AI ile, dil: en)"
 }
 ```
 
@@ -161,9 +201,9 @@ LOG_LEVEL=INFO
 MONGODB_URL=mongodb://localhost:27017
 MONGODB_DB_NAME=recipe_parser
 
-# OpenAI Configuration (AI parsing için - opsiyonel)
-OPENAI_API_KEY=sk-your-api-key-here
-ENABLE_AI_PARSING=false  # true yaparak aktifleştir
+# Google AI Configuration (AI parsing ve çeviri için)
+GOOGLE_AI_API_KEY=your_google_ai_api_key_here
+USE_AI_PARSING=true
 
 # Proxy Configuration (opsiyonel - rate limit/block aşmak için)
 PROXY_URL=http://proxy.example.com:8080

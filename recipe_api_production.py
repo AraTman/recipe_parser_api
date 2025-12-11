@@ -92,6 +92,7 @@ class Recipe(BaseModel):
 
 class RecipeRequest(BaseModel):
     url: str
+    language: Optional[str] = "tr"  # tr, en, de, fr, es, ar, etc.
     
     @field_validator('url')
     @classmethod
@@ -99,12 +100,22 @@ class RecipeRequest(BaseModel):
         if not any(platform in v.lower() for platform in ['instagram.com', 'tiktok.com', 'youtube.com', 'youtu.be']):
             raise ValueError('Sadece Instagram, TikTok veya YouTube linkleri desteklenir')
         return v
+    
+    @field_validator('language')
+    @classmethod
+    def validate_language(cls, v):
+        # ISO 639-1 dil kodları
+        supported_languages = ['tr', 'en', 'de', 'fr', 'es', 'it', 'ar', 'ru', 'zh', 'ja', 'ko']
+        if v and v not in supported_languages:
+            raise ValueError(f'Desteklenen diller: {", ".join(supported_languages)}')
+        return v or "tr"
 
 class RecipeResponse(BaseModel):
     success: bool
     recipe: Optional[Recipe] = None
     error: Optional[str] = None
     message: Optional[str] = None
+    parsed_with_ai: bool = False  # AI ile mi parse edildi?
 
 class HealthResponse(BaseModel):
     status: str
@@ -304,14 +315,36 @@ class AIRecipeParser:
             except Exception as e:
                 print(f"⚠️ Google AI initialization failed: {e}")
     
-    def parse_recipe(self, raw_text: str, title: str = "") -> Dict:
+    def parse_recipe(self, raw_text: str, title: str = "", target_language: str = "tr") -> Dict:
         """
-        Google Gemini ile tarifi parse et
+        Google Gemini ile tarifi parse et ve istenen dile çevir
+        
+        Args:
+            raw_text: Ham tarif metni
+            title: Tarif başlığı
+            target_language: Hedef dil kodu (tr, en, de, fr, es, etc.)
         """
         if not self.model:
             raise ValueError("Google AI API key not configured")
         
-        prompt = f"""Sen bir yemek tarifi uzmanısın. Aşağıdaki tarif metnini analiz et ve yapılandırılmış formata çevir.
+        # Dil isimleri
+        language_names = {
+            'tr': 'Türkçe',
+            'en': 'English',
+            'de': 'Deutsch',
+            'fr': 'Français',
+            'es': 'Español',
+            'it': 'Italiano',
+            'ar': 'العربية',
+            'ru': 'Русский',
+            'zh': '中文',
+            'ja': '日本語',
+            'ko': '한국어'
+        }
+        
+        target_lang_name = language_names.get(target_language, 'Türkçe')
+        
+        prompt = f"""Sen bir yemek tarifi uzmanısın. Aşağıdaki tarif metnini analiz et, yapılandırılmış formata çevir ve {target_lang_name} diline çevir.
 
 === TARİF METNİ ===
 Başlık: {title}
@@ -319,30 +352,37 @@ Başlık: {title}
 {raw_text}
 
 === GÖREV ===
-1. Türkçe ve İngilizce karışık ise sadece Türkçe kısmı al
-2. Malzemeleri standartlaştır (miktar, birim, isim)
-3. Adımları net ve sıralı hale getir
-4. Gereksiz tekrarları temizle
-5. Tahmini süre ve zorluk belirle
+1. Tarif metnini analiz et ve anla
+2. Türkçe ve İngilizce karışık ise temizle
+3. Malzemeleri standartlaştır (miktar, birim, isim)
+4. Adımları net ve sıralı hale getir
+5. Gereksiz tekrarları temizle
+6. Tahmini süre ve zorluk belirle
+7. **TÜM METNİ {target_lang_name} DİLİNE ÇEVİR**
+
+=== ÖNEMLİ ===
+- Başlık, açıklama, malzemeler, adımlar ve ipuçları {target_lang_name} dilinde olmalı
+- Miktarlar ve birimler hedef dilin standartlarına uygun olmalı
+- Zorluk seviyesi: {target_lang_name} dilinde (örn: Easy/Kolay, Medium/Orta, Hard/Zor)
 
 === ÇIKTI FORMATI ===
 Sadece JSON formatında döndür:
 
 {{
-  "title": "Kısa ve net başlık (Türkçe)",
-  "description": "2-3 cümle açıklama",
+  "title": "Kısa ve net başlık ({target_lang_name})",
+  "description": "2-3 cümle açıklama ({target_lang_name})",
   "ingredients": [
-    {{"item": "Malzeme adı", "amount": "Miktar", "unit": "Birim"}}
+    {{"item": "Malzeme adı ({target_lang_name})", "amount": "Miktar", "unit": "Birim ({target_lang_name})"}}
   ],
   "steps": [
-    {{"order": 1, "text": "Adım açıklaması", "duration": "Süre (opsiyonel)"}}
+    {{"order": 1, "text": "Adım açıklaması ({target_lang_name})", "duration": "Süre (opsiyonel)"}}
   ],
-  "total_duration": "Toplam süre (örn: 45 dakika)",
-  "prep_time": "Hazırlık süresi",
-  "cook_time": "Pişirme süresi",
-  "difficulty": "Kolay/Orta/Zor",
-  "servings": "Porsiyon (örn: 4 kişilik)",
-  "tips": ["İpucu 1", "İpucu 2"]
+  "total_duration": "Toplam süre ({target_lang_name})",
+  "prep_time": "Hazırlık süresi ({target_lang_name})",
+  "cook_time": "Pişirme süresi ({target_lang_name})",
+  "difficulty": "Kolay/Orta/Zor ({target_lang_name})",
+  "servings": "Porsiyon ({target_lang_name})",
+  "tips": ["İpucu 1 ({target_lang_name})", "İpucu 2 ({target_lang_name})"]
 }}
 
 Sadece JSON döndür, başka açıklama ekleme."""
@@ -718,18 +758,29 @@ class RecipeService:
         else:
             raise ValueError('Desteklenmeyen platform')
     
-    async def parse_recipe(self, url: str, use_ai: bool = None) -> Recipe:
-        """URL'den tarif çıkar (cache destekli, AI parsing opsiyonel)"""
+    async def parse_recipe(self, url: str, use_ai: bool = None, language: str = "tr") -> tuple[Recipe, bool]:
+        """URL'den tarif çıkar (cache destekli, AI parsing opsiyonel, çok dilli)
+        
+        Args:
+            url: Tarif URL'i
+            use_ai: AI parsing kullan (None = otomatik)
+            language: Hedef dil kodu (tr, en, de, fr, es, etc.)
+        
+        Returns:
+            tuple[Recipe, bool]: (recipe, was_parsed_with_ai)
+        """
         
         # use_ai parametresi verilmemişse global ayarı kullan
         if use_ai is None:
             use_ai = USE_AI_PARSING and self.ai_parser is not None
         
-        # 1. Cache kontrolü
-        cached = await self.db_helper.get_cached_recipe(url)
+        # 1. Cache kontrolü (dil bazlı)
+        cache_key = f"{url}_{language}"
+        cached = await self.db_helper.get_cached_recipe(cache_key)
         if cached:
-            print(f"✅ Cache'den döndürüldü: {url}")
-            return Recipe(**cached['recipe'])
+            print(f"✅ Cache'den döndürüldü: {url} ({language})")
+            # Cache'den gelen için AI flag'i bilinmiyor, False döndür
+            return Recipe(**cached['recipe']), False
         
         # 2. Platform tespit
         platform = self.detect_platform(url)
@@ -741,9 +792,13 @@ class RecipeService:
         # 4. Parse et
         if use_ai and self.ai_parser:
             # AI ile parse et
-            print(f"🤖 Google AI ile parsing: {url}")
+            print(f"🤖 Google AI ile parsing: {url} (dil: {language})")
             try:
-                ai_result = self.ai_parser.parse_recipe(caption, content.get('owner_username', ''))
+                ai_result = self.ai_parser.parse_recipe(
+                    caption, 
+                    content.get('owner_username', ''),
+                    target_language=language
+                )
                 
                 # AI sonucunu Recipe formatına çevir
                 ingredients = [
@@ -816,11 +871,13 @@ class RecipeService:
             created_at=datetime.now().isoformat()
         )
         
-        # 7. Cache'e kaydet
-        await self.db_helper.save_recipe(url, recipe.dict())
-        print(f"💾 Cache'e kaydedildi: {url}")
+        # 7. Cache'e kaydet (dil bazlı)
+        cache_key = f"{url}_{language}"
+        await self.db_helper.save_recipe(cache_key, recipe.dict())
+        print(f"💾 Cache'e kaydedildi: {url} ({language})")
         
-        return recipe
+        # use_ai değişkeni son durumu gösterir (AI başarısız olduysa False'a dönmüş olur)
+        return recipe, use_ai
 
 
 # Service will be initialized on startup
@@ -901,22 +958,37 @@ async def health():
 @app.post("/api/v1/parse-recipe", response_model=RecipeResponse)
 async def parse_recipe(request: RecipeRequest):
     """
-    Instagram, TikTok veya YouTube Shorts URL'den tarif çıkar
+    Instagram, TikTok veya YouTube Shorts URL'den tarif çıkar (Çok Dilli)
     
     **Özellikler:**
-    - ✅ MongoDB cache (aynı URL tekrar istenirse cache'den döner)
-    - ✅ Regex-based parsing (hızlı ve güvenilir)
-    - ✅ n8n entegrasyonu (AI parsing için n8n workflow kullan)
+    - ✅ Google AI (Gemini) ile akıllı parsing
+    - ✅ Çok dilli destek (11 dil)
+    - ✅ MongoDB cache (dil bazlı)
+    - ✅ Otomatik çeviri
     
     **Desteklenen Platformlar:**
     - Instagram (Reels, Posts)
     - TikTok
     - YouTube Shorts
     
+    **Desteklenen Diller:**
+    - tr: Türkçe (varsayılan)
+    - en: English
+    - de: Deutsch
+    - fr: Français
+    - es: Español
+    - it: Italiano
+    - ar: العربية
+    - ru: Русский
+    - zh: 中文
+    - ja: 日本語
+    - ko: 한국어
+    
     **Örnek Request:**
     ```json
     {
-        "url": "https://www.instagram.com/p/ABC123/"
+        "url": "https://www.instagram.com/reel/ABC123/",
+        "language": "en"
     }
     ```
     
@@ -925,24 +997,33 @@ async def parse_recipe(request: RecipeRequest):
     {
         "success": true,
         "recipe": {
-            "title": "Havuçlu Kek",
-            "ingredients": [...],
-            "steps": [...],
+            "title": "Carrot Cake",
+            "description": "A delicious carrot cake recipe...",
+            "ingredients": [
+                {"item": "Carrots", "amount": "2", "unit": "cups"}
+            ],
+            "steps": [
+                {"order": 1, "text": "Preheat the oven to 180°C..."}
+            ],
+            "difficulty": "Easy",
             ...
         },
-        "message": "Tarif başarıyla çıkarıldı"
+        "parsed_with_ai": true,
+        "message": "Tarif başarıyla çıkarıldı (AI ile, dil: en)"
     }
     ```
-    
-    **Not:** AI-powered parsing için n8n workflow kullanın.
     """
     try:
-        recipe = await service.parse_recipe(request.url)
+        recipe, parsed_with_ai = await service.parse_recipe(
+            url=request.url,
+            language=request.language
+        )
         
         return RecipeResponse(
             success=True,
             recipe=recipe,
-            message="Tarif başarıyla çıkarıldı"
+            parsed_with_ai=parsed_with_ai,
+            message=f"Tarif başarıyla çıkarıldı ({'AI' if parsed_with_ai else 'Regex'} ile, dil: {request.language})"
         )
         
     except ValueError as e:
