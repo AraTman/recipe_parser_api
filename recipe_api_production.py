@@ -66,6 +66,7 @@ class Ingredient(BaseModel):
 class RecipeStep(BaseModel):
     order: int
     text: str
+    ingredients: Optional[List[str]] = None  # Bu adımda kullanılan malzemeler
     duration: Optional[str] = None
     tip: Optional[str] = None
 
@@ -358,9 +359,10 @@ Başlık: {title}
 2. Türkçe ve İngilizce karışık ise temizle
 3. Malzemeleri standartlaştır (miktar, birim, isim)
 4. Adımları net ve sıralı hale getir
-5. Gereksiz tekrarları temizle
-6. Tahmini süre ve zorluk belirle
-7. **TÜM METNİ {target_lang_name} DİLİNE ÇEVİR**
+5. **ÖNEMLİ: Her adımda kullanılan malzemeleri "ingredients" listesinde belirt**
+6. Gereksiz tekrarları temizle
+7. Tahmini süre ve zorluk belirle
+8. **TÜM METNİ {target_lang_name} DİLİNE ÇEVİR**
 
 === ÖNEMLİ ===
 - Başlık, açıklama, malzemeler, adımlar ve ipuçları {target_lang_name} dilinde olmalı
@@ -377,7 +379,7 @@ Sadece JSON formatında döndür:
     {{"item": "Malzeme adı ({target_lang_name})", "amount": "Miktar", "unit": "Birim ({target_lang_name})"}}
   ],
   "steps": [
-    {{"order": 1, "text": "Adım açıklaması ({target_lang_name})", "duration": "Süre (opsiyonel)"}}
+    {{"order": 1, "text": "Adım açıklaması ({target_lang_name})", "ingredients": ["Malzeme 1", "Malzeme 2"], "duration": "Süre (opsiyonel)"}}
   ],
   "total_duration": "Toplam süre ({target_lang_name})",
   "prep_time": "Hazırlık süresi ({target_lang_name})",
@@ -732,7 +734,7 @@ class RecipeService:
         self.instagram_scraper = InstagramScraper(proxy_url=proxy_url)
         self.tiktok_scraper = TikTokScraper(proxy_url=proxy_url)
         self.youtube_scraper = YouTubeScraper(proxy_url=proxy_url)
-        self.parser = RecipeParser()
+        # Regex parser kaldırıldı - sadece AI parsing
         self.ai_parser = ai_parser
         self.db_helper = DatabaseHelper(db)
         self.proxy_url = proxy_url
@@ -815,12 +817,13 @@ class RecipeService:
                     RecipeStep(
                         order=step.get('order', i+1),
                         text=step.get('text', ''),
+                        ingredients=step.get('ingredients'),  # Her adımda kullanılan malzemeler
                         duration=step.get('duration'),
                         tip=None
                     ) for i, step in enumerate(ai_result.get('steps', []))
                 ]
                 
-                title = ai_result.get('title', self.parser.extract_title(caption))
+                title = ai_result.get('title', 'Tarif')
                 description = ai_result.get('description', caption[:200] + '...' if len(caption) > 200 else caption)
                 total_duration = ai_result.get('total_duration')
                 prep_time = ai_result.get('prep_time')
@@ -829,23 +832,26 @@ class RecipeService:
                 servings = ai_result.get('servings')
                 
             except Exception as e:
-                print(f"⚠️ AI parsing başarısız, regex'e geçiliyor: {e}")
-                # AI başarısız olursa regex'e düş
-                use_ai = False
+                error_msg = str(e)
+                # Rate limit hatası kontrolü
+                if "429" in error_msg or "quota" in error_msg.lower() or "rate" in error_msg.lower():
+                    print(f"⚠️ AI rate limit aşıldı")
+                    raise HTTPException(
+                        status_code=429,
+                        detail="Google AI rate limit aşıldı. Lütfen birkaç dakika sonra tekrar deneyin."
+                    )
+                else:
+                    print(f"❌ AI parsing başarısız: {e}")
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Tarif AI ile parse edilemedi: {str(e)}"
+                    )
         
-        if not use_ai or not self.ai_parser:
-            # Regex ile parse et
-            print(f"📝 Regex ile parsing: {url}")
-            title = self.parser.extract_title(caption)
-            description = caption[:200] + '...' if len(caption) > 200 else caption
-            ingredients = self.parser.parse_ingredients(caption)
-            steps = self.parser.parse_steps(caption)
-            duration_match = re.search(r'(\d+)\s*dakika', caption, re.IGNORECASE)
-            total_duration = duration_match.group(0) if duration_match else None
-            prep_time = None
-            cook_time = None
-            difficulty = self.parser.extract_difficulty(caption)
-            servings = self.parser.extract_servings(caption)
+        if not self.ai_parser:
+            raise HTTPException(
+                status_code=503,
+                detail="AI parsing servisi yapılandırılmamış. GOOGLE_AI_API_KEY gerekli."
+            )
         
         # 5. Hashtag'ler
         hashtags = re.findall(r'#(\w+)', caption)
